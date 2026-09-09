@@ -131,7 +131,7 @@ with col1:
     enable_drive = st.checkbox("1. Mount/Save to Google Drive ('Audiobook' folder)", value=True)
     
     model_name = st.text_input("7. Model Name", value="gemini-3.1-flash-tts-preview")
-    voice_name = st.selectbox("4. Voice Name", ["Charon", "Puck", "Zephyr", "Fenrir", "Aoede"])
+    voice_name = st.text_input("4. Voice Name (Manual)", value="Charon", help="Enter any valid Gemini voice name (e.g., Charon, Puck, Zephyr, Fenrir, Aoede, etc.)")
     chunk_size = st.number_input("3. Chunk Size (words)", min_value=50, max_value=500, value=200)
     temperature = st.slider("5. Temperature", min_value=0.0, max_value=1.0, value=0.85, step=0.05)
     base_delay = st.number_input("6. Base Delay Between Chunks (seconds)", min_value=0, max_value=120, value=60)
