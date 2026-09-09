@@ -1,0 +1,6 @@
+streamlit
+google-genai
+pypdf
+pydub
+google-api-python-client
+google-auth-oauthlib
