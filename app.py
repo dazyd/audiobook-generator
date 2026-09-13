@@ -3,54 +3,47 @@ import os
 import time
 import wave
 import struct
-import io
+import json
 from pypdf import PdfReader
 from pydub import AudioSegment
 from google import genai
 from google.genai import types
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
 
 # ---------------------------------------------------------
-# GOOGLE DRIVE SETUP
+# GOOGLE DRIVE SETUP (SERVICE ACCOUNT)
 # ---------------------------------------------------------
-SCOPES = ['https://www.googleapis.com/auth/drive.file']
-
-def get_drive_service():
-    creds = None
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not os.path.exists('credentials.json'):
-                st.error("Google Drive: 'credentials.json' file missing hai!")
-                return None
-            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open('token.json', 'w') as token:
-            token.write(creds.to_json())
+def get_drive_service(service_account_info):
+    """Authenticates Drive using Service Account JSON credentials."""
+    creds = service_account.Credentials.from_service_account_info(
+        service_account_info,
+        scopes=['https://www.googleapis.com/auth/drive']
+    )
     return build('drive', 'v3', credentials=creds)
 
 def get_or_create_drive_folder(service, folder_name="Audiobook"):
     query = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-    results = service.files().list(q=query, fields="files(id, name)").execute()
+    results = service.files().list(q=query, fields="files(id, name)", supportsAllDrives=True).execute()
     items = results.get('files', [])
     if items:
         return items[0]['id']
     meta = {'name': folder_name, 'mimeType': 'application/vnd.google-apps.folder'}
-    folder = service.files().create(body=meta, fields='id').execute()
+    folder = service.files().create(body=meta, fields='id', supportsAllDrives=True).execute()
     return folder.get('id')
 
-def upload_file_to_drive(service, file_path, folder_id):
+def upload_file_to_drive(service, file_path, folder_id, mime_type='audio/wav'):
     file_name = os.path.basename(file_path)
     file_metadata = {'name': file_name, 'parents': [folder_id]}
-    media = MediaFileUpload(file_path, resumable=True)
-    service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+    media = MediaFileUpload(file_path, mimetype=mime_type, resumable=True)
+    uploaded_file = service.files().create(
+        body=file_metadata, 
+        media_body=media, 
+        fields='id',
+        supportsAllDrives=True
+    ).execute()
+    return uploaded_file.get('id')
 
 # ---------------------------------------------------------
 # TEXT & AUDIO HELPERS
@@ -117,21 +110,55 @@ def merge_audio_chunks(file_paths, output_path, output_format):
     combined.export(output_path, format=output_format)
 
 # ---------------------------------------------------------
-# UI CONTROLS (10 INPUTS)
+# UI SETUP & API KEY VAULT
 # ---------------------------------------------------------
 st.set_page_config(page_title="AI Audiobook Studio", layout="wide")
 st.title("🎙️ Gemini Native Audiobook Generator")
 
+VAULT_FILE = "api_keys_vault.txt"
+saved_keys = ""
+if os.path.exists(VAULT_FILE):
+    with open(VAULT_FILE, "r") as f:
+        saved_keys = f.read()
+
+# Sidebar: API Key Manager Notes
+with st.sidebar:
+    st.header("🔑 API Keys Vault (Notes)")
+    keys_input = st.text_area(
+        "Paste all your AI Studio API Keys here (One key per line):", 
+        value=saved_keys,
+        height=200,
+        placeholder="AIzaSy...\nAIzaSy..."
+    )
+    if st.button("💾 Save Keys to Vault"):
+        with open(VAULT_FILE, "w") as f:
+            f.write(keys_input.strip())
+        st.success("Keys saved successfully!")
+        st.rerun()
+
+    key_list = [k.strip() for k in keys_input.split("\n") if k.strip()]
+    selected_api_key = ""
+    if key_list:
+        selected_api_key = st.selectbox("Select Active API Key:", key_list)
+    else:
+        st.caption("No keys saved yet. Paste keys above and click Save.")
+
+# Main Form
 col1, col2 = st.columns(2)
 
 with col1:
-    st.subheader("⚙️ Credentials & Configuration")
-    api_key = st.text_input("Gemini API Key", type="password")
+    st.subheader("⚙️ Credentials & Files")
+    api_key = st.text_input("Active Gemini API Key", value=selected_api_key, type="password")
     uploaded_file = st.file_uploader("2. Upload TXT or PDF Document", type=["txt", "pdf"])
-    enable_drive = st.checkbox("1. Mount/Save to Google Drive ('Audiobook' folder)", value=True)
     
+    enable_drive = st.checkbox("1. Save to Google Drive ('Audiobook' folder)", value=True)
+    drive_key_file = None
+    if enable_drive:
+        drive_key_file = st.file_uploader("Upload Service Account JSON Key", type=["json"])
+
+    st.subheader("Model Parameters")
     model_name = st.text_input("7. Model Name", value="gemini-3.1-flash-tts-preview")
-    voice_name = st.text_input("4. Voice Name (Manual)", value="Charon", help="Enter any valid Gemini voice name (e.g., Charon, Puck, Zephyr, Fenrir, Aoede, etc.)")
+    voice_name = st.text_input("4. Voice Name (Manual)", value="Charon")
     chunk_size = st.number_input("3. Chunk Size (words)", min_value=50, max_value=500, value=200)
     temperature = st.slider("5. Temperature", min_value=0.0, max_value=1.0, value=0.85, step=0.05)
     base_delay = st.number_input("6. Base Delay Between Chunks (seconds)", min_value=0, max_value=120, value=60)
@@ -150,7 +177,7 @@ with col2:
 # ---------------------------------------------------------
 if st.button("🚀 Start Audiobook Production", type="primary"):
     if not api_key:
-        st.error("API Key daalna zaroori hai!")
+        st.error("API Key missing! Pehle Sidebar me keys save karein ya manually enter karein.")
         st.stop()
     if not uploaded_file:
         st.error("Kripya TXT ya PDF file upload karein!")
@@ -159,10 +186,18 @@ if st.button("🚀 Start Audiobook Production", type="primary"):
     drive_service = None
     folder_id = None
     if enable_drive:
-        with st.spinner("Connecting to Google Drive..."):
-            drive_service = get_drive_service()
-            if drive_service:
+        if drive_key_file is not None:
+            try:
+                service_info = json.load(drive_key_file)
+                drive_service = get_drive_service(service_info)
                 folder_id = get_or_create_drive_folder(drive_service, "Audiobook")
+                st.sidebar.success("✅ Google Drive Connected!")
+            except Exception as e:
+                st.error(f"Google Drive Error: {str(e)}")
+                st.stop()
+        else:
+            st.error("Google Drive connect karne ke liye JSON key upload karein ya checkbox uncheck karein.")
+            st.stop()
 
     client = genai.Client(api_key=api_key, http_options=types.HttpOptions(api_version="v1alpha"))
     config = types.GenerateContentConfig(
@@ -186,21 +221,18 @@ if st.button("🚀 Start Audiobook Production", type="primary"):
     st.markdown("---")
     st.subheader("📊 Live Processing Status")
     
-    # Progress UI Elements
     progress_bar = st.progress(0)
     current_status_box = st.empty()
     countdown_box = st.empty()
-    
-    # Expandable visual activity log
-    log_container = st.container(height=300)
+    log_container = st.container(height=320)
 
     for i, chunk in enumerate(chunks):
         chunk_num = i + 1
         chunk_file = f"temp_chunks/{base_name}_chunk_{i}.wav"
 
-        # 1. Processing Step
-        current_status_box.info(f"▶️ chunk {chunk_num} out of {total_chunks} processing...")
-        log_container.write(f"▶️ chunk {chunk_num} out of {total_chunks} processing...")
+        # 1. Processing State
+        current_status_box.info(f"▶️ Chunk {chunk_num}/{total_chunks} processing...")
+        log_container.write(f"▶️ Chunk {chunk_num}/{total_chunks} processing...")
 
         if not os.path.exists(chunk_file):
             prompt = f"""Read the transcript according to these instructions:
@@ -239,47 +271,58 @@ if st.button("🚀 Start Audiobook Production", type="primary"):
                     else:
                         time.sleep(base_delay)
                 except Exception as e:
-                    log_container.write(f"⚠️ Error on chunk {chunk_num}: Retrying in {base_delay}s...")
+                    log_container.write(f"⚠️ Error on Chunk {chunk_num}: Retrying in {base_delay}s...")
                     time.sleep(base_delay)
 
         generated_wav_paths.append(chunk_file)
 
-        # 2. Saving to Drive Step
+        # 2. Drive Upload States
         if drive_service and folder_id:
-            current_status_box.info(f"✅ chunk {chunk_num} saving into drive...")
-            upload_file_to_drive(drive_service, chunk_file, folder_id)
-            log_container.write(f"✅ chunk {chunk_num} saving into drive")
+            current_status_box.info(f"⏳ Chunk {chunk_num}/{total_chunks} saving into Google Drive...")
+            log_container.write(f"⏳ Chunk {chunk_num}/{total_chunks} saving into Google Drive...")
+            try:
+                upload_file_to_drive(drive_service, chunk_file, folder_id, mime_type="audio/wav")
+                log_container.write(f"✅ Chunk {chunk_num} saved")
+            except Exception as e:
+                log_container.write(f"❌ Chunk {chunk_num} drive upload failed: {str(e)[:45]}")
+        else:
+            log_container.write(f"✅ Chunk {chunk_num} saved locally")
 
+        # Visual separator for clarity
+        log_container.write("")
         progress_bar.progress(chunk_num / total_chunks)
 
-        # Delay countdown visual
         if chunk_num < total_chunks and base_delay > 0:
             for s in range(base_delay, 0, -1):
                 countdown_box.caption(f"⏳ Waiting for API rate limit: {s} seconds remaining...")
                 time.sleep(1)
             countdown_box.empty()
 
-    # 3. All chunks completed message
-    st.success("🎉 All chunks created and saved into drive")
-    log_container.write("🎉 All chunks created and saved into drive")
+    # 3. All chunks finished
+    st.success("🎉 All chunks processed and saved successfully.")
+    log_container.write("🎉 All chunks processed and saved successfully.")
 
-    # 4. Merging Step
-    current_status_box.info("🔄 Merging all chunks into one file...")
-    log_container.write("✅ Merging all chunks into one file.")
+    # 4. Merging State
+    current_status_box.info("🔄 Merging into a full Audiobook...")
+    log_container.write("🔄 Merging into a full Audiobook...")
     
     final_output_name = f"{base_name}_Audiobook.{output_format}"
     merge_audio_chunks(generated_wav_paths, final_output_name, output_format)
 
     if drive_service and folder_id:
-        upload_file_to_drive(drive_service, final_output_name, folder_id)
+        try:
+            drive_mime = "audio/mpeg" if output_format == "mp3" else "audio/wav"
+            upload_file_to_drive(drive_service, final_output_name, folder_id, mime_type=drive_mime)
+        except Exception as e:
+            log_container.write(f"❌ Master file drive upload failed: {str(e)[:45]}")
 
-    # 5. Final Completion Message
+    # 5. Success
     current_status_box.empty()
     st.balloons()
-    st.success("✅ File successfully processed!")
-    log_container.write("✅ File successfully processed!")
+    st.success("✅ All files successfully merged")
+    log_container.write("✅ All files successfully merged")
 
     st.audio(final_output_name)
     with open(final_output_name, "rb") as f:
-        st.download_button("📥 Download Audiobook", f, file_name=final_output_name)
-        
+        st.download_button("📥 Download Master Audiobook", f, file_name=final_output_name)
+    
