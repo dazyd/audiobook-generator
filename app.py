@@ -177,7 +177,7 @@ with col2:
 # ---------------------------------------------------------
 if st.button("🚀 Start Audiobook Production", type="primary"):
     if not api_key:
-        st.error("API Key missing! Pehle Sidebar me keys save karein ya manually enter karein.")
+        st.error("API Key missing! Sidebar me keys save karein ya manually enter karein.")
         st.stop()
     if not uploaded_file:
         st.error("Kripya TXT ya PDF file upload karein!")
@@ -230,7 +230,7 @@ if st.button("🚀 Start Audiobook Production", type="primary"):
         chunk_num = i + 1
         chunk_file = f"temp_chunks/{base_name}_chunk_{i}.wav"
 
-        # 1. Processing State
+        # 1. Processing Step
         current_status_box.info(f"▶️ Chunk {chunk_num}/{total_chunks} processing...")
         log_container.write(f"▶️ Chunk {chunk_num}/{total_chunks} processing...")
 
@@ -271,13 +271,12 @@ if st.button("🚀 Start Audiobook Production", type="primary"):
                     else:
                         time.sleep(base_delay)
                 except Exception as e:
-    log_container.error(f"⚠️ Chunk {chunk_num} Error: {str(e)}")
-    time.sleep(base_delay)
-
+                    log_container.error(f"⚠️ Error on Chunk {chunk_num}: {str(e)}")
+                    time.sleep(base_delay)
 
         generated_wav_paths.append(chunk_file)
 
-        # 2. Drive Upload States
+        # 2. Drive Upload Step
         if drive_service and folder_id:
             current_status_box.info(f"⏳ Chunk {chunk_num}/{total_chunks} saving into Google Drive...")
             log_container.write(f"⏳ Chunk {chunk_num}/{total_chunks} saving into Google Drive...")
@@ -285,11 +284,10 @@ if st.button("🚀 Start Audiobook Production", type="primary"):
                 upload_file_to_drive(drive_service, chunk_file, folder_id, mime_type="audio/wav")
                 log_container.write(f"✅ Chunk {chunk_num} saved")
             except Exception as e:
-                log_container.write(f"❌ Chunk {chunk_num} drive upload failed: {str(e)[:45]}")
+                log_container.error(f"❌ Chunk {chunk_num} drive upload failed: {str(e)}")
         else:
             log_container.write(f"✅ Chunk {chunk_num} saved locally")
 
-        # Visual separator for clarity
         log_container.write("")
         progress_bar.progress(chunk_num / total_chunks)
 
@@ -299,11 +297,11 @@ if st.button("🚀 Start Audiobook Production", type="primary"):
                 time.sleep(1)
             countdown_box.empty()
 
-    # 3. All chunks finished
+    # 3. Chunks Done
     st.success("🎉 All chunks processed and saved successfully.")
     log_container.write("🎉 All chunks processed and saved successfully.")
 
-    # 4. Merging State
+    # 4. Merging Step
     current_status_box.info("🔄 Merging into a full Audiobook...")
     log_container.write("🔄 Merging into a full Audiobook...")
     
@@ -315,7 +313,7 @@ if st.button("🚀 Start Audiobook Production", type="primary"):
             drive_mime = "audio/mpeg" if output_format == "mp3" else "audio/wav"
             upload_file_to_drive(drive_service, final_output_name, folder_id, mime_type=drive_mime)
         except Exception as e:
-            log_container.write(f"❌ Master file drive upload failed: {str(e)[:45]}")
+            log_container.error(f"❌ Master file drive upload failed: {str(e)}")
 
     # 5. Success
     current_status_box.empty()
@@ -326,4 +324,3 @@ if st.button("🚀 Start Audiobook Production", type="primary"):
     st.audio(final_output_name)
     with open(final_output_name, "rb") as f:
         st.download_button("📥 Download Master Audiobook", f, file_name=final_output_name)
-    
