@@ -271,8 +271,9 @@ if st.button("🚀 Start Audiobook Production", type="primary"):
                     else:
                         time.sleep(base_delay)
                 except Exception as e:
-                    log_container.write(f"⚠️ Error on Chunk {chunk_num}: Retrying in {base_delay}s...")
-                    time.sleep(base_delay)
+    log_container.error(f"⚠️ Chunk {chunk_num} Error: {str(e)}")
+    time.sleep(base_delay)
+
 
         generated_wav_paths.append(chunk_file)
 
