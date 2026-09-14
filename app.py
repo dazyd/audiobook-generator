@@ -4,46 +4,37 @@ import time
 import wave
 import struct
 import json
+import base64
+import requests
 from pypdf import PdfReader
 from pydub import AudioSegment
 from google import genai
 from google.genai import types
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
 
 # ---------------------------------------------------------
-# GOOGLE DRIVE SETUP (SERVICE ACCOUNT)
+# GOOGLE DRIVE VIA APPS SCRIPT WEBHOOK (NO QUOTA RESTRICTION)
 # ---------------------------------------------------------
-def get_drive_service(service_account_info):
-    """Authenticates Drive using Service Account JSON credentials."""
-    creds = service_account.Credentials.from_service_account_info(
-        service_account_info,
-        scopes=['https://www.googleapis.com/auth/drive']
-    )
-    return build('drive', 'v3', credentials=creds)
-
-def get_or_create_drive_folder(service, folder_name="Audiobook"):
-    query = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-    results = service.files().list(q=query, fields="files(id, name)", supportsAllDrives=True).execute()
-    items = results.get('files', [])
-    if items:
-        return items[0]['id']
-    meta = {'name': folder_name, 'mimeType': 'application/vnd.google-apps.folder'}
-    folder = service.files().create(body=meta, fields='id', supportsAllDrives=True).execute()
-    return folder.get('id')
-
-def upload_file_to_drive(service, file_path, folder_id, mime_type='audio/wav'):
+def upload_file_to_drive_webhook(script_url, file_path, mime_type="audio/wav"):
     file_name = os.path.basename(file_path)
-    file_metadata = {'name': file_name, 'parents': [folder_id]}
-    media = MediaFileUpload(file_path, mimetype=mime_type, resumable=True)
-    uploaded_file = service.files().create(
-        body=file_metadata, 
-        media_body=media, 
-        fields='id',
-        supportsAllDrives=True
-    ).execute()
-    return uploaded_file.get('id')
+    with open(file_path, "rb") as f:
+        file_bytes = f.read()
+    b64_encoded = base64.b64encode(file_bytes).decode("utf-8")
+    
+    payload = {
+        "fileName": file_name,
+        "mimeType": mime_type,
+        "fileData": b64_encoded
+    }
+    
+    response = requests.post(script_url, json=payload, timeout=180)
+    if response.status_code == 200:
+        res_data = response.json()
+        if res_data.get("status") == "success":
+            return True, res_data.get("fileId")
+        else:
+            return False, res_data.get("message")
+    else:
+        return False, f"HTTP Error: {response.status_code}"
 
 # ---------------------------------------------------------
 # TEXT & AUDIO HELPERS
@@ -152,12 +143,16 @@ with col1:
     uploaded_file = st.file_uploader("2. Upload TXT or PDF Document", type=["txt", "pdf"])
     
     enable_drive = st.checkbox("1. Save to Google Drive ('Audiobook' folder)", value=True)
-    drive_key_file = None
+    drive_webhook_url = ""
     if enable_drive:
-        drive_key_file = st.file_uploader("Upload Service Account JSON Key", type=["json"])
+        drive_webhook_url = st.text_input(
+            "Google Apps Script Web App URL", 
+            value="",
+            placeholder="https://script.google.com/macros/s/.../exec"
+        )
 
     st.subheader("Model Parameters")
-    model_name = st.text_input("7. Model Name", value="gemini-3.1-flash-tts-preview")
+    model_name = st.text_input("7. Model Name", value="gemini-2.0-flash")
     voice_name = st.text_input("4. Voice Name (Manual)", value="Charon")
     chunk_size = st.number_input("3. Chunk Size (words)", min_value=50, max_value=500, value=200)
     temperature = st.slider("5. Temperature", min_value=0.0, max_value=1.0, value=0.85, step=0.05)
@@ -182,22 +177,9 @@ if st.button("🚀 Start Audiobook Production", type="primary"):
     if not uploaded_file:
         st.error("Kripya TXT ya PDF file upload karein!")
         st.stop()
-
-    drive_service = None
-    folder_id = None
-    if enable_drive:
-        if drive_key_file is not None:
-            try:
-                service_info = json.load(drive_key_file)
-                drive_service = get_drive_service(service_info)
-                folder_id = get_or_create_drive_folder(drive_service, "Audiobook")
-                st.sidebar.success("✅ Google Drive Connected!")
-            except Exception as e:
-                st.error(f"Google Drive Error: {str(e)}")
-                st.stop()
-        else:
-            st.error("Google Drive connect karne ke liye JSON key upload karein ya checkbox uncheck karein.")
-            st.stop()
+    if enable_drive and not drive_webhook_url.strip():
+        st.error("Kripya Google Apps Script Web App URL daalein ya Drive checkbox uncheck karein.")
+        st.stop()
 
     client = genai.Client(api_key=api_key, http_options=types.HttpOptions(api_version="v1alpha"))
     config = types.GenerateContentConfig(
@@ -277,12 +259,15 @@ if st.button("🚀 Start Audiobook Production", type="primary"):
         generated_wav_paths.append(chunk_file)
 
         # 2. Drive Upload Step
-        if drive_service and folder_id:
+        if enable_drive and drive_webhook_url.strip():
             current_status_box.info(f"⏳ Chunk {chunk_num}/{total_chunks} saving into Google Drive...")
             log_container.write(f"⏳ Chunk {chunk_num}/{total_chunks} saving into Google Drive...")
             try:
-                upload_file_to_drive(drive_service, chunk_file, folder_id, mime_type="audio/wav")
-                log_container.write(f"✅ Chunk {chunk_num} saved")
+                ok, res = upload_file_to_drive_webhook(drive_webhook_url.strip(), chunk_file, mime_type="audio/wav")
+                if ok:
+                    log_container.write(f"✅ Chunk {chunk_num} saved")
+                else:
+                    log_container.error(f"❌ Chunk {chunk_num} drive error: {res}")
             except Exception as e:
                 log_container.error(f"❌ Chunk {chunk_num} drive upload failed: {str(e)}")
         else:
@@ -297,7 +282,7 @@ if st.button("🚀 Start Audiobook Production", type="primary"):
                 time.sleep(1)
             countdown_box.empty()
 
-    # 3. Chunks Done
+    # 3. All Chunks Completed
     st.success("🎉 All chunks processed and saved successfully.")
     log_container.write("🎉 All chunks processed and saved successfully.")
 
@@ -308,14 +293,16 @@ if st.button("🚀 Start Audiobook Production", type="primary"):
     final_output_name = f"{base_name}_Audiobook.{output_format}"
     merge_audio_chunks(generated_wav_paths, final_output_name, output_format)
 
-    if drive_service and folder_id:
+    if enable_drive and drive_webhook_url.strip():
         try:
             drive_mime = "audio/mpeg" if output_format == "mp3" else "audio/wav"
-            upload_file_to_drive(drive_service, final_output_name, folder_id, mime_type=drive_mime)
+            ok, res = upload_file_to_drive_webhook(drive_webhook_url.strip(), final_output_name, mime_type=drive_mime)
+            if not ok:
+                log_container.error(f"❌ Master file drive upload error: {res}")
         except Exception as e:
             log_container.error(f"❌ Master file drive upload failed: {str(e)}")
 
-    # 5. Success
+    # 5. Success Display
     current_status_box.empty()
     st.balloons()
     st.success("✅ All files successfully merged")
@@ -324,3 +311,4 @@ if st.button("🚀 Start Audiobook Production", type="primary"):
     st.audio(final_output_name)
     with open(final_output_name, "rb") as f:
         st.download_button("📥 Download Master Audiobook", f, file_name=final_output_name)
+                
